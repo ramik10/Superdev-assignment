@@ -1,11 +1,12 @@
 use std::str::FromStr;
 
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder,Result};
+use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder, Result, ResponseError, error::InternalError};
 
 use serde::{Deserialize, Serialize};
 use solana_sdk::{instruction::{AccountMeta, Instruction}, pubkey::Pubkey, signature::Keypair, signer::Signer};
 use spl_token::{id,instruction};
 use base64::{Engine as _, engine::general_purpose};
+use std::fmt;
 
 #[derive(Serialize, Deserialize)]
 struct MintInfo {
@@ -45,8 +46,56 @@ struct ErrorResp {
     error: String
 }
 
+#[derive(Debug)]
+pub struct ApiError {
+    message: String,
+}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl ResponseError for ApiError {
+    fn error_response(&self) -> HttpResponse {
+        HttpResponse::BadRequest().json(ErrorResp {
+            success: false,
+            error: self.message.clone(),
+        })
+    }
+}
+
+impl From<&str> for ApiError {
+    fn from(msg: &str) -> Self {
+        ApiError { message: msg.to_string() }
+    }
+}
+
+impl From<String> for ApiError {
+    fn from(message: String) -> Self {
+        ApiError { message }
+    }
+}
+
+impl From<actix_web::error::JsonPayloadError> for ApiError {
+    fn from(err: actix_web::error::JsonPayloadError) -> Self {
+        ApiError {
+            message: "Invalid JSON format or structure".to_string(),
+        }
+    }
+}
+
+impl From<actix_web::Error> for ApiError {
+    fn from(err: actix_web::Error) -> Self {
+        ApiError {
+            message: "Request processing error".to_string(),
+        }
+    }
+}
+
 #[post("/keypair")]
-async fn keypair() -> Result<HttpResponse> {
+async fn keypair() -> Result<HttpResponse, ApiError> {
     let kp = Keypair::new();
     let resp = KeypairResp {
         success: true,
@@ -59,46 +108,20 @@ async fn keypair() -> Result<HttpResponse> {
 }
 
 #[post("/token/create")]
-async fn create_token(info: web::Json<MintInfo>) -> Result<HttpResponse> {
-    let mint_authority = match Pubkey::from_str(&info.mintAuthority) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            let error_resp = ErrorResp {
-                success: false,
-                error: "Invalid mint authority".to_string()
-            };
-            return Ok(HttpResponse::BadRequest().json(error_resp));
-        }
-    };
+async fn create_token(info: web::Json<MintInfo>) -> Result<HttpResponse, ApiError> {
+    let mint_authority = Pubkey::from_str(&info.mintAuthority)
+        .map_err(|_| ApiError::from("Invalid mint authority"))?;
     
-    let mint = match Pubkey::from_str(&info.mint) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            let error_resp = ErrorResp {
-                success: false,
-                error: "Invalid mint".to_string()
-            };
-            return Ok(HttpResponse::BadRequest().json(error_resp));
-        }
-    };
+    let mint = Pubkey::from_str(&info.mint)
+        .map_err(|_| ApiError::from("Invalid mint"))?;
     
-    let decimals = info.decimals;
-    let instruction_data = match instruction::initialize_mint(
+    let instruction_data = instruction::initialize_mint(
         &id(),
         &mint,
         &mint_authority,
         Some(&mint_authority),
-        decimals,
-    ) {
-        Ok(instruction) => instruction,
-        Err(e) => {
-            let error_resp = ErrorResp {
-                success: false,
-                error: format!("Failed to create mint instruction: {}", e)
-            };
-            return Ok(HttpResponse::InternalServerError().json(error_resp));
-        }
-    };
+        info.decimals,
+    ).map_err(|e| ApiError::from(format!("Failed to create mint instruction: {}", e)))?;
 
     let resp = MintResp {
         success: true,
@@ -112,11 +135,17 @@ async fn create_token(info: web::Json<MintInfo>) -> Result<HttpResponse> {
     Ok(HttpResponse::Ok().json(resp))
 }
 
-
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
         App::new()
+            .app_data(
+                web::JsonConfig::default()
+                    .error_handler(|err, _req| {
+                        let api_error = ApiError::from("Invalid JSON format or structure");
+                        actix_web::error::InternalError::from_response(err, api_error.error_response()).into()
+                    })
+            )
             .service(keypair)
             .service(create_token)
     })
