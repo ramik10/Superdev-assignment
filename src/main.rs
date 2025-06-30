@@ -304,6 +304,9 @@ async fn main() -> std::io::Result<()> {
             )
             .service(keypair)
             .service(create_token)
+            .service(mint_token)
+            .service(send_sol)
+            .service(send_token)
     })
     .bind(("127.0.0.1", 8080))?
     .run()
