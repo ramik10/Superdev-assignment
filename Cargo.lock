@@ -1171,6 +1171,7 @@ dependencies = [
  "bs58",
  "serde",
  "solana-sdk",
+ "solana-system-interface",
  "spl-token",
 ]
 
